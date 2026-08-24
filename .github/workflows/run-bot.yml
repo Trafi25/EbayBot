@@ -1,7 +1,10 @@
 name: Run Telegram Bot
 
 on:
-  workflow_dispatch: # Allows you to start it manually from the "Actions" tab
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   run-bot:
@@ -9,16 +12,18 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
-          java-version: '21'
-          distribution: 'temurin'
+          java-version: "21"
+          distribution: temurin
 
-      - name: Build and Run Bot
-        # This will run until the 6-hour GitHub Actions timeout
+      - name: Make Gradle executable
+        run: chmod +x gradlew
+
+      - name: Run bot
         run: ./gradlew run
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

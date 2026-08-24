@@ -1,5 +1,6 @@
 package com.example.ebay
 
+import com.example.models.BotState
 import com.github.kotlintelegrambot.Bot
 import com.github.kotlintelegrambot.entities.ChatId
 import kotlinx.coroutines.delay
@@ -8,30 +9,46 @@ import java.util.concurrent.ConcurrentHashMap
 
 class EbayMonitor(
     private val ebayService: EbayService,
-    private val telegramBot: Bot
+    private val telegramBot: Bot,
+    initialState: BotState = BotState(),
+    private val onStateChanged: suspend (BotState) -> Unit = {}
 ) {
     private val logger = LoggerFactory.getLogger(EbayMonitor::class.java)
     
     // chatId -> query
-    private val userSearches = ConcurrentHashMap<Long, String>()
+    private val userSearches = ConcurrentHashMap<Long, String>(initialState.userSearches)
     
     // chatId -> Set of seen Item IDs
-    private val seenItemsPerUser = ConcurrentHashMap<Long, MutableSet<String>>()
+    private val seenItemsPerUser = ConcurrentHashMap<Long, MutableSet<String>>().apply {
+        initialState.seenItemsPerUser.forEach { (id, items) ->
+            put(id, ConcurrentHashMap.newKeySet<String>().apply { addAll(items) })
+        }
+    }
     
     // chatId -> Is it the first search?
     private val firstSearch = ConcurrentHashMap<Long, Boolean>()
 
-    fun addOrUpdateSearch(chatId: Long, query: String) {
+    private suspend fun saveState() {
+        val state = BotState(
+            userSearches = userSearches.toMap(),
+            seenItemsPerUser = seenItemsPerUser.mapValues { it.value.toSet() }
+        )
+        onStateChanged(state)
+    }
+
+    suspend fun addOrUpdateSearch(chatId: Long, query: String) {
         userSearches[chatId] = query
         seenItemsPerUser[chatId] = ConcurrentHashMap.newKeySet()
         firstSearch[chatId] = true
-        logger.info("Updated search for $chatId to '$query'. Next search will be the initial population.")
+        saveState()
+        logger.info("Updated search for $chatId to '$query'.")
     }
 
-    fun stopSearch(chatId: Long) {
+    suspend fun stopSearch(chatId: Long) {
         userSearches.remove(chatId)
         seenItemsPerUser.remove(chatId)
         firstSearch.remove(chatId)
+        saveState()
         logger.info("Stopped search for $chatId")
     }
 
@@ -55,6 +72,11 @@ class EbayMonitor(
                         logger.info("Initial population for $chatId: marking ${krakowItems.size} items as seen.")
                         krakowItems.forEach { seenSet.add(it.itemId) }
                         firstSearch[chatId] = false
+                        
+                        telegramBot.sendMessage(
+                            chatId = ChatId.fromId(chatId),
+                            text = "Monitoring started for '$query' in Kraków!\nFound ${krakowItems.size} existing listings. I will notify you when new ones appear."
+                        )
                         continue
                     }
 
@@ -71,6 +93,7 @@ class EbayMonitor(
                             )
                             seenSet.add(item.itemId)
                         }
+                        saveState()
                     } else {
                         logger.info("No new items for $chatId")
                     }

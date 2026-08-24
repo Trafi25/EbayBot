@@ -72,3 +72,9 @@ data class SendMessageRequest(
     val chatId: Long,
     val text: String
 )
+
+@Serializable
+data class BotState(
+    val userSearches: Map<Long, String> = emptyMap(),
+    val seenItemsPerUser: Map<Long, Set<String>> = emptyMap()
+)
