@@ -82,6 +82,7 @@ fun main() = runBlocking {
                 
                 launch {
                     ebayMonitorRef?.addOrUpdateSearch(message.chat.id, query)
+                    bot.sendMessage(ChatId.fromId(message.chat.id), "🔍 Search for '$query' received! I'm checking eBay.pl for listings in Kraków now...")
                 }
             }
         }

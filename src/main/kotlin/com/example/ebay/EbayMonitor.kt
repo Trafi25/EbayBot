@@ -3,7 +3,11 @@ package com.example.ebay
 import com.example.models.BotState
 import com.github.kotlintelegrambot.Bot
 import com.github.kotlintelegrambot.entities.ChatId
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.selects.onTimeout
+import kotlinx.coroutines.selects.select
 import org.slf4j.LoggerFactory
 import java.util.concurrent.ConcurrentHashMap
 
@@ -15,8 +19,13 @@ class EbayMonitor(
 ) {
     private val logger = LoggerFactory.getLogger(EbayMonitor::class.java)
     
+    // Channel to trigger immediate monitoring check
+    private val triggerChannel = Channel<Unit>(Channel.CONFLATED)
+    
     // chatId -> query
     private val userSearches = ConcurrentHashMap<Long, String>(initialState.userSearches)
+    
+    // ... rest of fields ...
     
     // chatId -> Set of seen Item IDs
     private val seenItemsPerUser = ConcurrentHashMap<Long, MutableSet<String>>().apply {
@@ -42,6 +51,7 @@ class EbayMonitor(
         firstSearch[chatId] = true
         saveState()
         logger.info("Updated search for $chatId to '$query'.")
+        triggerChannel.trySend(Unit)
     }
 
     suspend fun stopSearch(chatId: Long) {
@@ -50,61 +60,85 @@ class EbayMonitor(
         firstSearch.remove(chatId)
         saveState()
         logger.info("Stopped search for $chatId")
+        triggerChannel.trySend(Unit)
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
     suspend fun startMonitoring() {
         logger.info("Starting eBay monitor loop...")
         while (true) {
             try {
-                for ((chatId, query) in userSearches) {
-                    logger.info("Periodic search: User $chatId, Query '$query'")
-                    val response = ebayService.searchItems(query)
-                    val items = response.itemSummaries ?: emptyList()
+                if (userSearches.isNotEmpty()) {
+                    for ((chatId, query) in userSearches) {
+                        // ... existing monitoring logic ...
+                        logger.info("Periodic search: User $chatId, Query '$query'")
+                        val response = ebayService.searchItems(query)
+                        val items = response.itemSummaries ?: emptyList()
 
-                    val seenSet = seenItemsPerUser.getOrPut(chatId) { ConcurrentHashMap.newKeySet() }
-                    
-                    val krakowItems = items.filter { item ->
-                        val city = item.itemLocation?.city?.lowercase() ?: ""
-                        city.contains("kraków") || city.contains("krakow")
-                    }
-
-                    if (firstSearch[chatId] == true) {
-                        logger.info("Initial population for $chatId: marking ${krakowItems.size} items as seen.")
-                        krakowItems.forEach { seenSet.add(it.itemId) }
-                        firstSearch[chatId] = false
+                        val seenSet = seenItemsPerUser.getOrPut(chatId) { ConcurrentHashMap.newKeySet() }
                         
-                        telegramBot.sendMessage(
-                            chatId = ChatId.fromId(chatId),
-                            text = "Monitoring started for '$query' in Kraków!\nFound ${krakowItems.size} existing listings. I will notify you when new ones appear."
-                        )
-                        continue
-                    }
+                        val krakowItems = items.filter { item ->
+                            val city = item.itemLocation?.city?.lowercase() ?: ""
+                            city.contains("kraków") || city.contains("krakow")
+                        }
 
-                    val newItems = krakowItems.filter { it.itemId !in seenSet }
-                    
-                    if (newItems.isNotEmpty()) {
-                        logger.info("Found ${newItems.size} NEW items in Kraków for $chatId")
-                        for (item in newItems) {
-                            val location = item.itemLocation?.city ?: "Unknown"
-                            val message = "🔔 NEW Listing in $location!\n\n${item.title}\nPrice: ${item.price?.value} ${item.price?.currency}\nLink: ${item.itemWebUrl}"
+                        if (firstSearch[chatId] == true) {
+                            logger.info("Initial population for $chatId: sending first results.")
+                            
+                            val limit = 5
+                            val initialItems = krakowItems.take(limit)
+                            
                             telegramBot.sendMessage(
                                 chatId = ChatId.fromId(chatId),
-                                text = message
+                                text = "✅ Моніторинг активований для '$query' у Кракові!\nОсь перші результати:"
                             )
-                            seenSet.add(item.itemId)
+
+                            for (item in initialItems) {
+                                val message = "📍 Знайдено: ${item.title}\nЦіна: ${item.price?.value} ${item.price?.currency}\nПосилання: ${item.itemWebUrl}"
+                                telegramBot.sendMessage(chatId = ChatId.fromId(chatId), text = message)
+                            }
+
+                            krakowItems.forEach { seenSet.add(it.itemId) }
+                            firstSearch[chatId] = false
+                            saveState()
+                            continue
                         }
-                        saveState()
-                    } else {
-                        logger.info("No new items for $chatId")
+
+                        val newItems = krakowItems.filter { it.itemId !in seenSet }
+                        
+                        if (newItems.isNotEmpty()) {
+                            logger.info("Found ${newItems.size} NEW items in Kraków for $chatId")
+                            for (item in newItems) {
+                                val location = item.itemLocation?.city ?: "Unknown"
+                                val message = "🔔 NEW Listing in $location!\n\n${item.title}\nPrice: ${item.price?.value} ${item.price?.currency}\nLink: ${item.itemWebUrl}"
+                                telegramBot.sendMessage(
+                                    chatId = ChatId.fromId(chatId),
+                                    text = message
+                               )
+                                seenSet.add(item.itemId)
+                            }
+                            saveState()
+                        } else {
+                            logger.info("No new items for $chatId")
+                        }
                     }
+                } else {
+                    logger.info("No active searches. Waiting for trigger...")
                 }
             } catch (e: Exception) {
                 logger.error("Critical error in eBay monitor loop", e)
             }
 
-            // Wait for 10 minutes
-            logger.info("Waiting 10 minutes before next check...")
-            delay(10 * 60 * 1000L)
+            // Wait for 8 hours (3 times a day) OR until a new search is added
+            logger.info("Waiting 8 hours (or until triggered)...")
+            select<Unit> {
+                triggerChannel.onReceive { 
+                    logger.info("Monitor loop triggered early by search update.")
+                }
+                onTimeout(8 * 60 * 60 * 1000L) {
+                    logger.info("Monitor loop timeout reached (8h interval).")
+                }
+            }
         }
     }
 }
