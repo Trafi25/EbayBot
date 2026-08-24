@@ -35,7 +35,7 @@ class EbayService(
         }.body()
 
         accessToken = response.access_token
-        tokenExpiry = currentTime + (response.expires_in * 1000) - 60000 // Buffer of 1 minute
+        tokenExpiry = currentTime + (response.expires_in * 1000) - 60000
         return accessToken!!
     }
 
@@ -45,7 +45,8 @@ class EbayService(
             header(HttpHeaders.Authorization, "Bearer $token")
             header("X-EBAY-C-MARKETPLACE-ID", "EBAY_PL")
             parameter("q", query)
-            parameter("limit", 5)
+            parameter("limit", 20)
+            parameter("fieldgroups", "EXTENDED")
         }.body()
     }
 }
